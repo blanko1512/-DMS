@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+sqlalchemy
+psycopg2-binary
+python-dotenv
+python-multipart
+cloudinary
+pymupdf
+pytesseract
+pillow
+web3
+py-solc-x
+PyJWT
+pwdlib[argon2]
+email-validator

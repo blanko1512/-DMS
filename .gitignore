@@ -1,0 +1,11 @@
+backend/.venv/
+backend/.env
+backend/storage/
+backend/backups/
+backend/restore-tests/
+frontend/node_modules/
+frontend/dist/
+.env
+upload-too-large.pdf
+__pycache__/
+*.py[cod]
