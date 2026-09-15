@@ -36,6 +36,7 @@ class OTPRequiredResponse(BaseModel):
     status: str
     challenge_id: uuid.UUID
     message: str
+    dev_otp: str | None = None
 
 
 class OTPVerifyRequest(BaseModel):

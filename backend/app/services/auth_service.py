@@ -101,6 +101,7 @@ def create_login_otp_challenge(db: Session, user: User) -> OTPChallenge:
     record_audit_event(db, user.id, "OTP_REQUIRED", "otp_challenge", challenge.id, "PENDING")
     db.commit()
     db.refresh(challenge)
+    challenge._dev_otp = otp
     return challenge
 
 

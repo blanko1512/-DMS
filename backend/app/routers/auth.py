@@ -45,6 +45,7 @@ def login_user(request: LoginRequest, db: Session = Depends(get_db)):
         status="OTP_REQUIRED",
         challenge_id=challenge.id,
         message="OTP verification required.",
+        dev_otp=getattr(challenge, "_dev_otp", None),
     )
 
 
