@@ -48,6 +48,7 @@ class LoginChallengeResponse(BaseModel):
     challenge_id: uuid.UUID
     message: str
     dev_otp: str | None = None
+    poll_token: str | None = None
     expires_at: datetime | None = None
 
 
@@ -56,7 +57,7 @@ class OTPRequiredResponse(LoginChallengeResponse):
 
 
 class AuthenticatorRequiredResponse(LoginChallengeResponse):
-    pass
+    poll_token: str
 
 
 class AuthenticatorChallengeStatusResponse(BaseModel):

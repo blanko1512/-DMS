@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies.auth import get_authenticator_registration_context, get_authenticator_user, get_current_user, require_roles
+from app.dependencies.auth import get_authenticator_challenge_context, get_authenticator_poll_context, get_authenticator_registration_context, get_authenticator_user, get_current_user, require_roles
 from app.models.authenticator_challenge import AuthenticatorChallenge
 from app.models.authenticator_device import AuthenticatorDevice
 from app.models.otp_challenge import OTPChallenge
@@ -33,7 +33,7 @@ from app.schemas.auth import (
     RegisterRequest,
 )
 from app.services.audit_service import record_audit_event
-from app.services.auth_service import access_token_expiration_seconds, authenticate_user, create_access_token, create_authenticator_session_token, create_login_otp_challenge, hash_password, normalize_role, verify_login_otp
+from app.services.auth_service import access_token_expiration_seconds, authenticate_user, create_access_token, create_authenticator_poll_token, create_authenticator_session_token, create_login_otp_challenge, hash_password, normalize_role, verify_login_otp
 from app.services.otp_delivery import development_otp_enabled, otp_delivery
 from app.services.authenticator_service import (
     approve_authenticator_challenge,
@@ -104,6 +104,7 @@ def login_user(request: LoginRequest, db: Session = Depends(get_db)):
             challenge_id=challenge.id,
             message="Authenticator approval required.",
             expires_at=challenge.expires_at,
+            poll_token=create_authenticator_poll_token(user, challenge.id),
         )
 
     challenge = create_login_otp_challenge(db, user)
@@ -173,9 +174,15 @@ def create_mobile_authenticator_session(
 @router.get("/authenticator-challenge/{challenge_id}", response_model=AuthenticatorChallengeStatusResponse)
 def get_authenticator_challenge_status(
     challenge_id: uuid.UUID,
-    current_user: User = Depends(get_authenticator_user),
+    auth_context: tuple[User, dict] = Depends(get_authenticator_challenge_context),
     db: Session = Depends(get_db),
 ):
+    current_user, token_payload = auth_context
+    if (
+        token_payload.get("token_use") == "authenticator_poll"
+        and token_payload.get("challenge_id") != str(challenge_id)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Poll token is bound to another challenge.")
     challenge = db.get(AuthenticatorChallenge, challenge_id)
     if challenge is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Challenge not found.")
@@ -336,14 +343,23 @@ def approve_authenticator_login_challenge(
 @router.post("/login/complete", response_model=OTPTokenResponse)
 def complete_authenticator_login_challenge(
     request: AuthenticatorLoginCompletionRequest,
+    auth_context: tuple[User, dict] = Depends(get_authenticator_poll_context),
     db: Session = Depends(get_db),
 ):
+    current_user, token_payload = auth_context
+    if token_payload.get("challenge_id") != str(request.challenge_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Poll token is bound to another challenge.")
     challenge = db.get(AuthenticatorChallenge, request.challenge_id)
     if challenge is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Challenge not found.")
+    if challenge.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot complete this challenge.")
     if challenge.status != "APPROVED":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge is not approved.")
-    if challenge.expires_at <= __import__("datetime").datetime.now(__import__("datetime").timezone.utc):
+    expires_at = challenge.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
         challenge.status = "EXPIRED"
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired.")

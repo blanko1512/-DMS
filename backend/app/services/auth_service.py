@@ -85,6 +85,19 @@ def create_authenticator_session_token(
     return jwt.encode(payload, secret, algorithm=algorithm)
 
 
+def create_authenticator_poll_token(user: User, challenge_id) -> str:
+    secret, algorithm, _ = _jwt_settings()
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "token_use": "authenticator_poll",
+        "challenge_id": str(challenge_id),
+        "iat": now,
+        "exp": now + timedelta(minutes=10),
+    }
+    return jwt.encode(payload, secret, algorithm=algorithm)
+
+
 def access_token_expiration_seconds() -> int:
     _, _, expires_minutes = _jwt_settings()
     return expires_minutes * 60

@@ -20,6 +20,7 @@ def _get_authenticated_user(
     db: Session = Depends(get_db),
     *,
     allow_authenticator_token: bool = False,
+    allow_authenticator_poll_token: bool = False,
     require_registration_scope: bool = False,
 ) -> tuple[User, dict]:
     if credentials is None or credentials.scheme.lower() != "bearer":
@@ -35,10 +36,12 @@ def _get_authenticated_user(
     try:
         payload = jwt.decode(credentials.credentials, secret, algorithms=[algorithm])
         token_use = payload.get("token_use")
-        if token_use not in (None, "access", "authenticator"):
+        if token_use not in (None, "access", "authenticator", "authenticator_poll"):
             raise jwt.InvalidTokenError("Invalid token purpose.")
         if token_use == "authenticator" and not allow_authenticator_token:
             raise jwt.InvalidTokenError("Authenticator token is not an access token.")
+        if token_use == "authenticator_poll" and not allow_authenticator_poll_token:
+            raise jwt.InvalidTokenError("Authenticator poll token is not an access token.")
         if (
             token_use == "authenticator"
             and require_registration_scope
@@ -76,6 +79,32 @@ def get_authenticator_user(
 ) -> User:
     user, _ = _get_authenticated_user(credentials, db, allow_authenticator_token=True)
     return user
+
+
+def get_authenticator_challenge_context(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> tuple[User, dict]:
+    return _get_authenticated_user(
+        credentials,
+        db,
+        allow_authenticator_token=True,
+        allow_authenticator_poll_token=True,
+    )
+
+
+def get_authenticator_poll_context(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> tuple[User, dict]:
+    user, payload = _get_authenticated_user(
+        credentials,
+        db,
+        allow_authenticator_poll_token=True,
+    )
+    if payload.get("token_use") != "authenticator_poll":
+        raise HTTPException(status_code=401, detail="A challenge-scoped login token is required.")
+    return user, payload
 
 
 def get_authenticator_registration_context(

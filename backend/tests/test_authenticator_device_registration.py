@@ -372,6 +372,105 @@ def test_authenticator_approval_rejects_missing_invalid_and_expired_tokens(monke
     assert expired.status_code == 401
 
 
+def test_website_poll_token_is_challenge_scoped_and_completion_returns_access_token(monkeypatch):
+    jwt_secret = secrets.token_urlsafe(32)
+    monkeypatch.setenv('JWT_SECRET_KEY', jwt_secret)
+    monkeypatch.setenv('JWT_ALGORITHM', 'HS256')
+    user = make_user('website.poll@example.com', name='Website Poll User')
+    device = AuthenticatorDevice(
+        user_id=user.id,
+        device_identifier=f'website-poll-device-{uuid.uuid4()}',
+        is_active=True,
+    )
+    db = SessionLocal()
+    try:
+        db.add(device)
+        db.commit()
+    finally:
+        db.close()
+
+    login = client.post(
+        '/api/auth/login',
+        json={'email': 'website.poll@example.com', 'password': 'SecretPass123'},
+    )
+    assert login.status_code == 200, login.text
+    response_body = login.json()
+    assert response_body['status'] == 'AUTHENTICATOR_REQUIRED'
+    assert 'access_token' not in response_body
+    challenge_id = response_body['challenge_id']
+    poll_token = response_body['poll_token']
+    claims = jwt.decode(poll_token, jwt_secret, algorithms=['HS256'])
+    assert claims['token_use'] == 'authenticator_poll'
+    assert claims['challenge_id'] == challenge_id
+    assert claims['exp'] - claims['iat'] == 600
+    headers = {'Authorization': f'Bearer {poll_token}'}
+
+    unauthenticated_poll = client.get(
+        f'/api/auth/authenticator-challenge/{challenge_id}',
+    )
+    assert unauthenticated_poll.status_code == 401
+
+    pending = client.get(
+        f'/api/auth/authenticator-challenge/{challenge_id}',
+        headers=headers,
+    )
+    assert pending.status_code == 200, pending.text
+    assert pending.json()['status'] == 'PENDING'
+
+    wrong_challenge = client.get(
+        f'/api/auth/authenticator-challenge/{uuid.uuid4()}',
+        headers=headers,
+    )
+    assert wrong_challenge.status_code == 403
+
+    normal_auth_endpoint = client.get(
+        '/api/auth/authenticator/devices',
+        headers=headers,
+    )
+    assert normal_auth_endpoint.status_code == 401
+
+    db = SessionLocal()
+    try:
+        challenge = db.get(AuthenticatorChallenge, uuid.UUID(challenge_id))
+        assert challenge is not None
+        challenge.status = 'APPROVED'
+        db.commit()
+    finally:
+        db.close()
+
+    missing_completion_auth = client.post(
+        '/api/auth/login/complete',
+        json={'challenge_id': challenge_id},
+    )
+    assert missing_completion_auth.status_code == 401
+
+    wrong_completion_challenge = client.post(
+        '/api/auth/login/complete',
+        json={'challenge_id': str(uuid.uuid4())},
+        headers=headers,
+    )
+    assert wrong_completion_challenge.status_code == 403
+
+    completed = client.post(
+        '/api/auth/login/complete',
+        json={'challenge_id': challenge_id},
+        headers=headers,
+    )
+    assert completed.status_code == 200, completed.text
+    website_token = completed.json()['access_token']
+    website_claims = jwt.decode(website_token, jwt_secret, algorithms=['HS256'])
+    assert website_claims['token_use'] == 'access'
+    assert website_claims['sub'] == str(user.id)
+
+    db = SessionLocal()
+    try:
+        challenge = db.get(AuthenticatorChallenge, uuid.UUID(challenge_id))
+        assert challenge is not None
+        assert challenge.status == 'CONSUMED'
+    finally:
+        db.close()
+
+
 def test_device_registration_stores_public_key_for_device_bound_authenticator():
     user = make_user('publickey.device@example.com', name='Public Key User')
     token = create_access_token(user)
