@@ -1,4 +1,5 @@
 import os
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,15 @@ configured_origins = [
     for origin in os.getenv("CORS_ORIGINS", "").split(",")
     if origin.strip()
 ]
+is_render = os.getenv("RENDER", "").lower() == "true"
+local_hosts = {"localhost", "127.0.0.1", "10.0.2.2"}
+if is_render and not configured_origins:
+    raise RuntimeError("Set CORS_ORIGINS to the deployed website origin on Render.")
+if is_render and any(
+    (urlsplit(origin).hostname or "").lower() in local_hosts
+    for origin in configured_origins
+):
+    raise RuntimeError("Render CORS_ORIGINS must not contain local development hosts.")
 cors_origins = configured_origins or [
     "http://localhost:3000",
     "http://localhost:5173",

@@ -21,6 +21,12 @@ class MobileOtpRevealRequest(BaseModel):
     password: str
 
 
+class AuthenticatorSessionRequest(BaseModel):
+    email: EmailStr
+    password: str
+    device_id: str = Field(min_length=1, max_length=255)
+
+
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -92,6 +98,13 @@ class OTPTokenResponse(BaseModel):
     access_token: str
     token_type: str
     expires_in: int
+
+
+class AuthenticatorSessionResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int = 600
+    can_register: bool
 
 
 class AuthUserResponse(BaseModel):

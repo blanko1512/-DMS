@@ -59,8 +59,28 @@ def create_access_token(user: User) -> str:
     payload = {
         "sub": str(user.id),
         "role": user.role,
+        "token_use": "access",
         "iat": now,
         "exp": now + timedelta(minutes=expires_minutes),
+    }
+    return jwt.encode(payload, secret, algorithm=algorithm)
+
+
+def create_authenticator_session_token(
+    user: User,
+    *,
+    can_register: bool,
+    device_id: str,
+) -> str:
+    secret, algorithm, _ = _jwt_settings()
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user.id),
+        "token_use": "authenticator",
+        "can_register": can_register,
+        "device_id": device_id,
+        "iat": now,
+        "exp": now + timedelta(minutes=10),
     }
     return jwt.encode(payload, secret, algorithm=algorithm)
 

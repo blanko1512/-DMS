@@ -7,13 +7,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.dependencies.auth import get_current_user, require_roles
+from app.dependencies.auth import get_authenticator_registration_context, get_authenticator_user, get_current_user, require_roles
 from app.models.authenticator_challenge import AuthenticatorChallenge
 from app.models.authenticator_device import AuthenticatorDevice
 from app.models.otp_challenge import OTPChallenge
 from app.models.user import User
 from app.schemas.auth import (
     AuthUserResponse,
+    AuthenticatorSessionRequest,
+    AuthenticatorSessionResponse,
     AuthenticatorChallengeApprovalRequest,
     AuthenticatorChallengeApprovalResponse,
     AuthenticatorChallengeStatusResponse,
@@ -31,7 +33,7 @@ from app.schemas.auth import (
     RegisterRequest,
 )
 from app.services.audit_service import record_audit_event
-from app.services.auth_service import access_token_expiration_seconds, authenticate_user, create_access_token, create_login_otp_challenge, hash_password, normalize_role, verify_login_otp
+from app.services.auth_service import access_token_expiration_seconds, authenticate_user, create_access_token, create_authenticator_session_token, create_login_otp_challenge, hash_password, normalize_role, verify_login_otp
 from app.services.otp_delivery import development_otp_enabled, otp_delivery
 from app.services.authenticator_service import (
     approve_authenticator_challenge,
@@ -148,10 +150,30 @@ def reveal_mobile_otp(request: MobileOtpRevealRequest, db: Session = Depends(get
     )
 
 
+@router.post("/authenticator/session", response_model=AuthenticatorSessionResponse)
+def create_mobile_authenticator_session(
+    request: AuthenticatorSessionRequest,
+    db: Session = Depends(get_db),
+):
+    user = authenticate_user(db, request.email, request.password)
+    active_devices = list_active_devices(db, user.id)
+    can_register = not active_devices or any(
+        device.device_identifier == request.device_id for device in active_devices
+    )
+    return AuthenticatorSessionResponse(
+        access_token=create_authenticator_session_token(
+            user,
+            can_register=can_register,
+            device_id=request.device_id,
+        ),
+        can_register=can_register,
+    )
+
+
 @router.get("/authenticator-challenge/{challenge_id}", response_model=AuthenticatorChallengeStatusResponse)
 def get_authenticator_challenge_status(
     challenge_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_authenticator_user),
     db: Session = Depends(get_db),
 ):
     challenge = db.get(AuthenticatorChallenge, challenge_id)
@@ -175,7 +197,7 @@ def get_authenticator_challenge_status(
 
 @router.get("/authenticator-challenges/pending", response_model=list[PendingAuthenticatorChallengeResponse])
 def list_pending_authenticator_challenges(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_authenticator_user),
     db: Session = Depends(get_db),
 ):
     challenges = (
@@ -202,7 +224,7 @@ def list_pending_authenticator_challenges(
 @router.get("/authenticator-challenges/device/{device_id}", response_model=list[PendingAuthenticatorChallengeResponse])
 def list_pending_authenticator_challenges_for_device(
     device_id: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_authenticator_user),
     db: Session = Depends(get_db),
 ):
     device = (
@@ -253,16 +275,22 @@ def verify_otp(request: OTPVerifyRequest, db: Session = Depends(get_db)):
 @router.post("/authenticator/approve", response_model=AuthenticatorChallengeApprovalResponse)
 def approve_authenticator_login_challenge(
     request: AuthenticatorChallengeApprovalRequest,
+    current_user: User = Depends(get_authenticator_user),
     db: Session = Depends(get_db),
 ):
     challenge = db.get(AuthenticatorChallenge, request.challenge_id)
     if challenge is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Challenge not found.")
+    if challenge.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You cannot approve this challenge.")
     if challenge.status != "PENDING":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge is no longer pending.")
     if challenge.authenticator_device_id is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge is not bound to a device.")
-    if challenge.expires_at <= __import__("datetime").datetime.now(__import__("datetime").timezone.utc):
+    expires_at = challenge.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= datetime.now(timezone.utc):
         challenge.status = "EXPIRED"
         db.commit()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Challenge expired.")
@@ -336,12 +364,15 @@ def complete_authenticator_login_challenge(
 @router.post("/authenticator/register", response_model=AuthenticatorDeviceResponse)
 def register_authenticator_device_for_user(
     request: AuthenticatorDeviceRegistrationRequest,
-    current_user: User = Depends(get_current_user),
+    registration_context: tuple[User, str | None] = Depends(get_authenticator_registration_context),
     db: Session = Depends(get_db),
 ):
+    current_user, scoped_device_id = registration_context
     device_identifier = request.device_id.strip()
     if not device_identifier:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Device ID is required.")
+    if scoped_device_id is not None and scoped_device_id != device_identifier:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Authenticator session is bound to another device.")
 
     existing = (
         db.query(AuthenticatorDevice)

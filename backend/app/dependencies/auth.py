@@ -15,10 +15,13 @@ from app.services.audit_service import record_audit_event
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-def get_current_user(
+def _get_authenticated_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
-) -> User:
+    *,
+    allow_authenticator_token: bool = False,
+    require_registration_scope: bool = False,
+) -> tuple[User, dict]:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -31,6 +34,17 @@ def get_current_user(
         raise HTTPException(status_code=503, detail="Authentication is not configured.")
     try:
         payload = jwt.decode(credentials.credentials, secret, algorithms=[algorithm])
+        token_use = payload.get("token_use")
+        if token_use not in (None, "access", "authenticator"):
+            raise jwt.InvalidTokenError("Invalid token purpose.")
+        if token_use == "authenticator" and not allow_authenticator_token:
+            raise jwt.InvalidTokenError("Authenticator token is not an access token.")
+        if (
+            token_use == "authenticator"
+            and require_registration_scope
+            and payload.get("can_register") is not True
+        ):
+            raise HTTPException(status_code=403, detail="This session cannot register another authenticator.")
         user_id = uuid.UUID(str(payload.get("sub")))
     except (jwt.InvalidTokenError, ValueError, TypeError):
         raise HTTPException(
@@ -45,7 +59,41 @@ def get_current_user(
             detail="Invalid or inactive user.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    return user, payload
+
+
+def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    user, _ = _get_authenticated_user(credentials, db)
     return user
+
+
+def get_authenticator_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> User:
+    user, _ = _get_authenticated_user(credentials, db, allow_authenticator_token=True)
+    return user
+
+
+def get_authenticator_registration_context(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
+) -> tuple[User, str | None]:
+    user, payload = _get_authenticated_user(
+        credentials,
+        db,
+        allow_authenticator_token=True,
+        require_registration_scope=True,
+    )
+    if payload.get("token_use") != "authenticator":
+        return user, None
+    device_id = payload.get("device_id")
+    if not isinstance(device_id, str) or not device_id:
+        raise HTTPException(status_code=401, detail="Authenticator session has no device binding.")
+    return user, device_id
 
 
 def require_roles(*roles: str) -> Callable:
